@@ -7,11 +7,12 @@ import {
   TouchableOpacity,
   Dimensions,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { 
-  Dumbbell, 
-  Clock, 
+import {
+  Dumbbell,
+  Clock,
   Flame,
   Trophy,
   Play,
@@ -21,15 +22,19 @@ import {
   Users,
   Target,
   Award,
-  Activity
+  Activity,
+  CheckCircle,
+  AlertCircle,
 } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useColorScheme, getColors } from '../../hooks/useColorScheme';
 import { router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useTodayDataNew } from '../../hooks/useTodayDataNew';
-import { getWorkoutTemplates, WorkoutTemplate } from '../../lib/workoutTemplates';
-import { getClientTrainingSessions } from '../../lib/trainingSessionQueries';
-import { supabase } from '../../lib/supabase';
+import { getWorkoutTemplates, initializeDefaultTemplates } from '../../lib/workoutTemplates';
+import { supabase } from '@/lib/supabase'; // Import supabase
+import { getClientTrainingSessions } from '../../lib/trainingSessionQueries'; // Import getClientTrainingSessions
+import { TrainingSession } from '../../lib/database'; // Import TrainingSession type
 
 const { width } = Dimensions.get('window');
 
@@ -51,18 +56,31 @@ export default function CoachingClientView() {
 
   const [selectedTab, setSelectedTab] = useState('workouts');
   const [refreshing, setRefreshing] = useState(false);
-  const [workoutTemplates, setWorkoutTemplates] = useState<WorkoutTemplate[]>([]);
+  const [workoutTemplates, setWorkoutTemplates] = useState<any[]>([]);
   const [weeklyWorkouts, setWeeklyWorkouts] = useState<WeeklyWorkout[]>([]);
   const [loadingWeekly, setLoadingWeekly] = useState(true);
 
   useEffect(() => {
     loadWorkoutTemplates();
-    loadWeeklyWorkouts();
   }, []);
+
+  useEffect(() => {
+    if (data?.profile?.id) {
+      loadWeeklyWorkouts(data.profile.id);
+    }
+  }, [data?.profile?.id, workoutTemplates]);
+
+  // Refresh weekly workouts every time the screen comes into focus (e.g., user navigates back after trainer edited plan)
+  useFocusEffect(
+    React.useCallback(() => {
+      if (data?.profile?.id) {
+        loadWeeklyWorkouts(data.profile.id);
+      }
+    }, [data?.profile?.id, workoutTemplates])
+  );
 
   const loadWorkoutTemplates = async () => {
     try {
-      // Fetch templates from Supabase database
       const templates = await getWorkoutTemplates();
       setWorkoutTemplates(templates);
     } catch (error) {
@@ -70,34 +88,13 @@ export default function CoachingClientView() {
     }
   };
 
-  const loadWeeklyWorkouts = async () => {
+  const loadWeeklyWorkouts = async (clientId: string) => {
     try {
       setLoadingWeekly(true);
-      
-      // Get current user profile
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        console.log('No authenticated user found');
-        setLoadingWeekly(false);
-        return;
-      }
 
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('user_id', user.id)
-        .single();
-
-      if (!profile) {
-        console.log('No profile found for user');
-        setLoadingWeekly(false);
-        return;
-      }
-
-      // Get current week dates (Monday to Sunday)
       const today = new Date();
       const currentDay = today.getDay();
-      const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay; // Handle Sunday as 0
+      const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay;
       const monday = new Date(today);
       monday.setDate(today.getDate() + mondayOffset);
 
@@ -108,90 +105,63 @@ export default function CoachingClientView() {
         weekDates.push(date);
       }
 
-      // Fetch workout sessions for this week
-      const startDate = weekDates[0].toISOString().split('T')[0];
-      const endDate = weekDates[6].toISOString().split('T')[0];
+      const startDate = weekDates[0] && typeof weekDates[0].toISOString === 'function' ? weekDates[0].toISOString().split('T')[0] : '';
+      const endDate = weekDates[6] && typeof weekDates[6].toISOString === 'function' ? weekDates[6].toISOString().split('T')[0] : '';
 
-      const { data: workoutSessions, error: sessionsError } = await supabase
-        .from('workout_sessions')
-        .select('*')
-        .eq('client_id', profile.id)
-        .gte('date', startDate)
-        .lte('date', endDate)
-        .order('date', { ascending: true });
+      console.log('Fetching training sessions for client:', clientId, 'from', startDate, 'to', endDate);
+      
+      const trainingSessions = await getClientTrainingSessions(clientId, startDate, endDate);
+      
+      console.log('Found training sessions:', trainingSessions.length);
 
-      if (sessionsError) {
-        console.error('Error fetching workout sessions:', sessionsError);
-      }
-
-      // Fetch training sessions for this week
-      const { data: trainingSessions, error: trainingError } = await supabase
-        .from('training_sessions')
-        .select('*')
-        .eq('client_id', profile.id)
-        .gte('scheduled_date', startDate)
-        .lte('scheduled_date', endDate)
-        .order('scheduled_date', { ascending: true });
-
-      if (trainingError) {
-        console.error('Error fetching training sessions:', trainingError);
-      }
-
-      // Create weekly workout structure
       const dayNames = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
       const weeklyData: WeeklyWorkout[] = weekDates.map((date, index) => {
-        const dateString = date.toISOString().split('T')[0];
+        const dateString = date && typeof date.toISOString === 'function' ? date.toISOString().split('T')[0] : '';
         const dayNumber = date.getDate();
         
-        // Check for workout session on this date
-        const workoutSession = workoutSessions?.find(session => session.date === dateString);
-        
-        // Check for training session on this date
-        const trainingSession = trainingSessions?.find(session => session.scheduled_date === dateString);
-        
-        // Prefer workout session over training session
-        const session = workoutSession || trainingSession;
-        
+        const session = trainingSessions.find(s => {
+          const sDate = s.scheduled_date ? new Date(s.scheduled_date).toISOString().split('T')[0] : '';
+          return sDate === dateString;
+        });
+
         let template = null;
         let completed = false;
         let missed = false;
         let sessionId = undefined;
-        let scheduledTime = undefined;
+        let scheduledTime: string | undefined = undefined;
 
         if (session) {
-          // Try to get template info
+          console.log('Found session for', dateString, ':', session);
+          
+          // Handle sessions with template_id
           if (session.template_id) {
             const templateData = workoutTemplates.find(t => t.id === session.template_id);
             if (templateData) {
               template = { id: templateData.id, name: templateData.name };
             } else {
-              // Fallback template info
               template = { id: session.template_id, name: 'Workout' };
             }
           } else {
-            // Generic workout/training session
+            // Handle custom sessions without template_id
             template = { 
               id: session.id, 
-              name: session.type || 'Training Session' 
+              name: session.session_type || session.type || 'Custom Session' 
             };
           }
-
-          sessionId = session.id;
-          scheduledTime = session.start_time || session.scheduled_time;
           
-          // Determine completion status
-          if (workoutSession) {
-            completed = workoutSession.completed || false;
-          } else if (trainingSession) {
-            completed = trainingSession.status === 'completed';
-            missed = trainingSession.status === 'no_show';
-          }
+          sessionId = session.id;
+          scheduledTime = session.scheduled_time ?? undefined;
 
-          // Check if session is missed (past date and not completed)
-          const sessionDate = new Date(dateString);
-          const now = new Date();
-          if (sessionDate < now && !completed) {
+          if (session.status === 'completed') {
+            completed = true;
+          } else if (session.status === 'no_show' || session.status === 'cancelled') {
             missed = true;
+          } else {
+            const sessionDate = new Date(dateString);
+            const now = new Date();
+            if (sessionDate < now && session.status === 'scheduled') {
+              missed = true;
+            }
           }
         }
 
@@ -202,10 +172,11 @@ export default function CoachingClientView() {
           completed,
           missed,
           sessionId,
-          scheduledTime
+          scheduledTime: scheduledTime as string | undefined
         };
       });
 
+      console.log('Weekly workouts data:', weeklyData);
       setWeeklyWorkouts(weeklyData);
     } catch (error) {
       console.error('Error loading weekly workouts:', error);
@@ -214,11 +185,14 @@ export default function CoachingClientView() {
     }
   };
 
+
   const handleRefresh = async () => {
     setRefreshing(true);
     await refreshData();
     await loadWorkoutTemplates();
-    await loadWeeklyWorkouts();
+    if (data?.profile?.id) {
+      await loadWeeklyWorkouts(data.profile.id);
+    }
     setRefreshing(false);
   };
 
@@ -227,50 +201,34 @@ export default function CoachingClientView() {
   };
 
   const handleDayPress = (workout: WeeklyWorkout) => {
-    if (!workout.template) {
+    if (!workout.template && !workout.sessionId) {
       console.log('No workout scheduled for this day');
       return;
     }
 
-    console.log('handleDayPress: workout:', workout);
-    
-    if (workout.completed) {
-      // Navigate to workout detail/history
-      if (workout.sessionId) {
+    // If we have a session ID, always use that for navigation
+    if (workout.sessionId) {
+      if (workout.completed) {
         router.push(`/workout-detail/${workout.sessionId}`);
       } else {
+        // For incomplete sessions, go to today's workout with the session ID
+        router.push(`/todays-workout/${workout.sessionId}`);
+      }
+    } 
+    // If we only have a template ID (no session ID)
+    else if (workout.template) {
+      if (workout.completed) {
+        // For completed workouts, navigate to template detail
         router.push(`/workout-detail/${workout.template.id}`);
-      }
-    } else if (workout.missed) {
-      // Show missed workout detail
-      router.push(`/workout-detail/${workout.template.id}`);
-    } else {
-      // Navigate to start workout
-      if (workout.sessionId) {
-        router.push(`/start-workout/${workout.sessionId}`);
       } else {
-        router.push(`/start-workout/${workout.template.id}`);
+        // For scheduled workouts, navigate to template detail
+        router.push(`/todays-workout/${workout.template.id}`);
       }
-    }
-  };
-
-  const formatDate = (date: Date) => {
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(today.getDate() - 1);
-
-    if (date.toDateString() === today.toDateString()) {
-      return 'Today';
-    } else if (date.toDateString() === yesterday.toDateString()) {
-      return 'Yesterday';
     } else {
-      return date.toLocaleDateString('en-US', { 
-        weekday: 'long',
-        month: 'short',
-        day: 'numeric'
-      });
+      Alert.alert('Info', 'No specific session found to start or view details for this workout.');
     }
   };
+
 
   const getWorkoutCount = () => {
     return weeklyWorkouts.filter(w => w.template !== null).length;
@@ -278,7 +236,7 @@ export default function CoachingClientView() {
 
   const renderWeeklyCalendar = () => (
     <View style={styles.calendarSection}>
-      <TouchableOpacity 
+      <TouchableOpacity
         style={styles.calendarHeader}
         onPress={handleTrainingCalendarPress}
         activeOpacity={0.7}
@@ -286,7 +244,7 @@ export default function CoachingClientView() {
         <Text style={styles.calendarTitle}>Training (this week)</Text>
         <ChevronRight size={20} color={colors.textSecondary} />
       </TouchableOpacity>
-      
+
       {loadingWeekly ? (
         <View style={styles.loadingContainer}>
           <Text style={styles.loadingText}>Loading workouts...</Text>
@@ -294,7 +252,7 @@ export default function CoachingClientView() {
       ) : (
         <>
           <View style={styles.weekContainer}>
-            {weeklyWorkouts.map((workout, index) => (
+            {(weeklyWorkouts || []).map((workout, index) => (
               <TouchableOpacity
                 key={index}
                 style={[
@@ -304,7 +262,7 @@ export default function CoachingClientView() {
                   workout.missed && styles.missedDayButton
                 ]}
                 onPress={() => handleDayPress(workout)}
-                disabled={!workout.template}
+                disabled={!workout.template && !workout.sessionId}
                 activeOpacity={0.7}
               >
                 <Text style={[
@@ -336,7 +294,7 @@ export default function CoachingClientView() {
               </TouchableOpacity>
             ))}
           </View>
-          
+
           <Text style={styles.weekSummary}>
             You have {getWorkoutCount()} workouts this week!
           </Text>
@@ -360,7 +318,7 @@ export default function CoachingClientView() {
           <Text style={styles.macrosDescription}>
             Start by setting your daily goal
           </Text>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.macrosButton}
             onPress={() => router.push('/food-journal')}
           >
@@ -398,41 +356,39 @@ export default function CoachingClientView() {
 
     return (
       <>
-        {/* Achievement Progress */}
         <View style={styles.card}>
           <View style={styles.cardHeader}>
             <Text style={styles.cardTitle}>Your Progress</Text>
             <Trophy size={24} color={colors.warning} />
           </View>
-          
+
           <Text style={styles.achievementSummary}>
             You've unlocked 1 out of 3 achievements. Keep going!
           </Text>
-          
+
           <View style={styles.achievementProgressBar}>
             <View style={[styles.achievementProgress, { width: '33.33%' }]} />
           </View>
         </View>
 
-        {/* Achievement List */}
         <Text style={styles.sectionTitle}>Achievements</Text>
-        
+
         {achievements.map((achievement, index) => (
           <View key={index} style={styles.achievementCard}>
             <View style={styles.achievementIcon}>
               <Text style={styles.achievementEmoji}>{achievement.icon}</Text>
             </View>
-            
+
             <View style={styles.achievementInfo}>
               <Text style={styles.achievementName}>{achievement.name}</Text>
               <Text style={styles.achievementProgressText}>
-                {achievement.completed 
-                  ? 'Completed!' 
+                {achievement.completed
+                  ? 'Completed!'
                   : `${achievement.progress}/${achievement.name === '7-Day Streak' ? 7 : achievement.name === '100 Workouts' ? 100 : 1}`
                 }
               </Text>
             </View>
-            
+
             {achievement.completed && (
               <View style={styles.completedBadge}>
                 <Text style={styles.completedText}>✓</Text>
@@ -492,8 +448,8 @@ export default function CoachingClientView() {
         </View>
       </View>
 
-      <ScrollView 
-        style={styles.scrollView} 
+      <ScrollView
+        style={styles.scrollView}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
@@ -501,33 +457,29 @@ export default function CoachingClientView() {
       >
         {selectedTab === 'workouts' ? (
           <>
-            {/* Weekly Training Calendar */}
             {renderWeeklyCalendar()}
-
-            {/* Task Section */}
             {renderTaskSection()}
-
-            {/* Macros Section */}
             {renderMacrosSection()}
-
-            {/* Resources Section */}
             {renderResourcesSection()}
-
-            {/* Trainer/Team Info */}
             {data && 'clientAssignment' in data && data.clientAssignment && (
+              <TouchableOpacity
+               
+                onPress={() => router.push('/team')}
+              >
+
               <View style={styles.card}>
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>Your Team</Text>
                   <Users size={24} color={colors.info} />
                 </View>
-                
+
                 {data.clientAssignment.trainer && (
                   <View style={styles.teamMember}>
                     <Text style={styles.teamMemberRole}>Trainer</Text>
                     <Text style={styles.teamMemberName}>{data.clientAssignment.trainer.full_name}</Text>
                   </View>
                 )}
-                
+
                 {data.clientAssignment.nutritionist && (
                   <View style={styles.teamMember}>
                     <Text style={styles.teamMemberRole}>Nutritionist</Text>
@@ -535,6 +487,7 @@ export default function CoachingClientView() {
                   </View>
                 )}
               </View>
+            </TouchableOpacity>
             )}
           </>
         ) : (
