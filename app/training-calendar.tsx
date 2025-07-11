@@ -1,3 +1,4 @@
+// app/training-calendar.tsx
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -11,13 +12,13 @@ import {
   RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { 
-  ArrowLeft, 
-  Menu, 
-  RotateCcw, 
-  Clock, 
-  CheckCircle, 
-  AlertCircle, 
+import {
+  ArrowLeft,
+  Menu,
+  RotateCcw,
+  Clock,
+  CheckCircle,
+  AlertCircle,
   Undo2,
   Calendar,
   Play,
@@ -25,28 +26,26 @@ import {
   Target,
   TrendingUp,
   ChevronRight,
-  ChevronLeft
+  ChevronLeft,
+  X
 } from 'lucide-react-native';
 import { useColorScheme, getColors } from '@/hooks/useColorScheme';
 import { router } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 import { getClientTrainingSessions } from '@/lib/trainingSessionQueries';
+import { TrainingSession } from '@/types/workout'; // Import TrainingSession type
 
-interface WorkoutSession {
-  id: string;
-  date: string;
+interface WeeklyWorkout {
   dayName: string;
   dayNumber: number;
-  dayShort: string;
-  template_id: string | null;
-  trainer_id: string | null;
-  status: 'completed' | 'missed' | 'scheduled' | 'rest';
-  duration_minutes: number | null;
-  exercises: any[];
-  notes: string | null;
+  template: { id: string; name: string } | null;
   completed: boolean;
-  start_time?: string;
-  end_time?: string;
+  missed: boolean;
+  sessionId?: string;
+  scheduledTime?: string;
+  status: 'completed' | 'missed' | 'scheduled' | 'rest' | 'cancelled';
+  duration_minutes?: number;
+  notes?: string;
 }
 
 interface WeeklyStats {
@@ -61,7 +60,7 @@ export default function TrainingCalendarScreen() {
   const colors = getColors(colorScheme);
   const styles = createStyles(colors);
 
-  const [weeklyWorkouts, setWeeklyWorkouts] = useState<WorkoutSession[]>([]);
+  const [weeklyWorkouts, setWeeklyWorkouts] = useState<WeeklyWorkout[]>([]);
   const [weeklyStats, setWeeklyStats] = useState<WeeklyStats>({
     totalWorkouts: 0,
     completedWorkouts: 0,
@@ -97,41 +96,28 @@ export default function TrainingCalendarScreen() {
   const initializeData = async () => {
     try {
       setLoading(true);
-      const profile = await getCurrentUserProfile();
-      if (profile) {
-        setUserProfile(profile);
-      }
-    } catch (error) {
-      console.error('Error initializing data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const getCurrentUserProfile = async () => {
-    try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
-        console.log('No authenticated user found');
-        return null;
+        setLoading(false);
+        return;
       }
 
-      const { data, error } = await supabase
+      const { data: profile, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('user_id', user.id)
         .single();
 
-      if (error) {
+      if (error || !profile) {
         console.error('Error fetching profile:', error);
-        return null;
+        setLoading(false);
+        return;
       }
-
-      console.log('User profile loaded:', data);
-      return data;
+      setUserProfile(profile);
     } catch (error) {
-      console.error('Error in getCurrentUserProfile:', error);
-      return null;
+      console.error('Error initializing data:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -163,88 +149,53 @@ export default function TrainingCalendarScreen() {
       const startDate = weekDates[0].toISOString().split('T')[0];
       const endDate = weekDates[6].toISOString().split('T')[0];
 
-      console.log('Fetching workout sessions for:', {
+      console.log('Fetching training sessions for:', {
         client_id: userProfile.id,
         startDate,
         endDate
       });
 
-      // Fetch workout sessions for the week
-      const { data: sessions, error } = await supabase
-        .from('workout_sessions')
-        .select('*')
-        .eq('client_id', userProfile.id)
-        .gte('date', startDate)
-        .lte('date', endDate)
-        .order('date', { ascending: true });
-
-      if (error) {
-        console.error('Error fetching workout sessions:', error);
-        Alert.alert('Error', 'Failed to load workout sessions');
-        return;
-      }
-
-      console.log('Fetched sessions:', sessions);
-
-      // Also fetch training sessions if user is a client
-      const { data: trainingSessions, error: trainingError } = await supabase
-        .from('training_sessions')
-        .select('*')
-        .eq('client_id', userProfile.id)
-        .gte('scheduled_date', startDate)
-        .lte('scheduled_date', endDate)
-        .order('scheduled_date', { ascending: true });
-
-      if (trainingError) {
-        console.error('Error fetching training sessions:', trainingError);
-      }
+      const trainingSessions = await getClientTrainingSessions(userProfile.id, startDate, endDate);
 
       console.log('Fetched training sessions:', trainingSessions);
 
       // Create weekly schedule
-      const weeklySchedule: WorkoutSession[] = [];
-      const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const weeklySchedule: WeeklyWorkout[] = [];
+      const dayNames = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
       const dayShortNames = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
       weekDates.forEach((date, index) => {
         const dateString = date.toISOString().split('T')[0];
+        const dayNumber = date.getDate();
         
-        // Check for workout session
-        const workoutSession = sessions?.find(s => s.date === dateString);
+        const session = trainingSessions.find(s => s.scheduled_date === dateString);
         
-        // Check for training session
-        const trainingSession = trainingSessions?.find(s => s.scheduled_date === dateString);
-        
-        // Prefer workout session over training session
-        const session = workoutSession || trainingSession;
-        
-        const workoutSessionData: WorkoutSession = {
-          id: session?.id || `${dateString}-${index}`,
-          date: dateString,
+        const workoutSessionData: WeeklyWorkout = {
           dayName: dayNames[index],
-          dayNumber: date.getDate(),
-          dayShort: dayShortNames[index],
-          template_id: session?.template_id || null,
-          trainer_id: session?.trainer_id || null,
+          dayNumber: dayNumber,
+          template: session?.template ? { id: session.template.id, name: session.template.name } : null,
+          completed: false,
+          missed: false,
+          sessionId: session?.id,
+          scheduledTime: session?.scheduled_time,
           status: 'rest',
-          duration_minutes: session?.duration_minutes || null,
-          exercises: session?.exercises || [],
-          notes: session?.notes || null,
-          completed: session?.completed || false,
-          start_time: session?.start_time || session?.scheduled_time,
-          end_time: session?.end_time
+          duration_minutes: session?.duration_minutes,
+          notes: session?.notes,
         };
 
-        // Determine status
-        const today = new Date().toISOString().split('T')[0];
-        
+        // Determine status and completed flag
+        const now = new Date();
+        const sessionDateTime = new Date(`${dateString}T${session?.scheduled_time || '00:00:00'}`);
+
         if (session) {
-          if (session.completed || session.status === 'completed') {
-            workoutSessionData.status = 'completed';
-          } else if (dateString < today) {
+          workoutSessionData.status = session.status;
+          workoutSessionData.completed = session.status === 'completed';
+          if (session.status === 'scheduled') {
+            if (sessionDateTime < now) {
+              workoutSessionData.status = 'missed'; // Scheduled session in the past is missed
+            }
+          } else if (session.status === 'no_show') {
             workoutSessionData.status = 'missed';
-          } else {
-            workoutSessionData.status = 'scheduled';
           }
         }
 
@@ -262,8 +213,8 @@ export default function TrainingCalendarScreen() {
     }
   };
 
-  const calculateWeeklyStats = (workouts: WorkoutSession[]) => {
-    const totalWorkouts = workouts.filter(w => w.template_id !== null || w.status !== 'rest').length;
+  const calculateWeeklyStats = (workouts: WeeklyWorkout[]) => {
+    const totalWorkouts = workouts.filter(w => w.template !== null || w.status !== 'rest').length;
     const completedWorkouts = workouts.filter(w => w.status === 'completed').length;
     const totalDuration = workouts
       .filter(w => w.status === 'completed')
@@ -289,7 +240,7 @@ export default function TrainingCalendarScreen() {
     setSelectedItem(null);
   };
 
-  const handleWorkoutPress = (workout: WorkoutSession, index: number) => {
+  const handleWorkoutPress = (workout: WeeklyWorkout, index: number) => {
     if (isRearrangeMode) {
       if (selectedItem === null) {
         setSelectedItem(index);
@@ -297,18 +248,20 @@ export default function TrainingCalendarScreen() {
         setSelectedItem(null);
       } else {
         // Swap workouts logic would go here
+        Alert.alert('Rearrange', `Swap workout on ${weeklyWorkouts[selectedItem].dayName} with ${workout.dayName}`);
         setSelectedItem(null);
       }
     } else {
       // Navigate to workout details or start workout
-      if (workout.template_id || workout.status === 'scheduled') {
+      if (workout.sessionId) {
         if (workout.status === 'scheduled') {
-          // Navigate to start workout
-          router.push(`/start-workout/${workout.id}`);
-        } else if (workout.status === 'completed') {
-          // Navigate to workout details
-          router.push(`/workout-detail/${workout.id}`);
+          router.push(`/start-workout/${workout.sessionId}`);
+        } else if (workout.status === 'completed' || workout.status === 'missed' || workout.status === 'cancelled') {
+          router.push(`/workout-detail/${workout.sessionId}`);
         }
+      } else if (workout.template) {
+        // If no session ID but template exists, navigate to template details
+        router.push(`/todays-workout/${workout.template.id}`);
       }
     }
   };
@@ -318,9 +271,12 @@ export default function TrainingCalendarScreen() {
       case 'completed':
         return <CheckCircle size={16} color={colors.success} />;
       case 'missed':
+      case 'no_show':
         return <AlertCircle size={16} color={colors.error} />;
       case 'scheduled':
         return <Clock size={16} color={colors.primary} />;
+      case 'cancelled':
+        return <X size={16} color={colors.textSecondary} />;
       default:
         return null;
     }
@@ -380,17 +336,18 @@ export default function TrainingCalendarScreen() {
             <TouchableOpacity
               style={[
                 styles.dayHeaderCircle,
-                (workout.template_id || workout.status !== 'rest') && styles.activeDayHeaderCircle,
+                (workout.template || workout.status !== 'rest') && styles.activeDayHeaderCircle,
                 workout.status === 'completed' && styles.completedDayHeaderCircle,
-                workout.status === 'missed' && styles.missedDayHeaderCircle
+                (workout.status === 'missed' || workout.status === 'no_show') && styles.missedDayHeaderCircle,
+                workout.status === 'cancelled' && styles.cancelledDayHeaderCircle
               ]}
               onPress={() => handleWorkoutPress(workout, index)}
               activeOpacity={0.7}
             >
               <Text style={[
                 styles.dayHeaderNumber,
-                (workout.template_id || workout.status !== 'rest') && styles.activeDayHeaderNumber,
-                (workout.status === 'completed' || workout.status === 'missed') && styles.statusDayHeaderNumber
+                (workout.template || workout.status !== 'rest') && styles.activeDayHeaderNumber,
+                (workout.status === 'completed' || workout.status === 'missed' || workout.status === 'no_show' || workout.status === 'cancelled') && styles.statusDayHeaderNumber
               ]}>
                 {workout.dayNumber}
               </Text>
@@ -429,9 +386,9 @@ export default function TrainingCalendarScreen() {
     </View>
   );
 
-  const renderWorkoutItem = (workout: WorkoutSession, index: number) => {
+  const renderWorkoutItem = (workout: WeeklyWorkout, index: number) => {
     const isSelected = selectedItem === index;
-    const hasWorkout = workout.template_id || workout.status !== 'rest';
+    const hasWorkout = workout.template || (workout.status !== 'rest' && workout.status !== 'cancelled');
     
     return (
       <Animated.View
@@ -453,35 +410,38 @@ export default function TrainingCalendarScreen() {
             styles.workoutItem,
             isSelected && styles.selectedWorkoutItem,
             !hasWorkout && styles.restDayItem,
-            workout.status === 'missed' && styles.missedWorkoutItem
+            (workout.status === 'missed' || workout.status === 'no_show') && styles.missedWorkoutItem,
+            workout.status === 'cancelled' && styles.cancelledWorkoutItem
           ]}
           onPress={() => handleWorkoutPress(workout, index)}
           activeOpacity={0.7}
         >
           <View style={styles.workoutItemLeft}>
             <View style={styles.workoutDateContainer}>
-              <Text style={styles.workoutDayShort}>{workout.dayShort}</Text>
+              <Text style={styles.workoutDayShort}>{workout.dayName}</Text>
               <Text style={styles.workoutDayNumber}>{workout.dayNumber}</Text>
             </View>
             
             <View style={styles.workoutInfoContainer}>
               <Text style={[
                 styles.workoutName,
-                workout.status === 'missed' && styles.missedWorkoutName
+                (workout.status === 'missed' || workout.status === 'no_show' || workout.status === 'cancelled') && styles.missedWorkoutName
               ]}>
-                {hasWorkout ? 'Training Session' : 'Rest Day'}
+                {hasWorkout ? (workout.template?.name || 'Training Session') : (workout.status === 'cancelled' ? 'Cancelled Session' : 'Rest Day')}
               </Text>
               {hasWorkout && (
                 <View style={styles.workoutStatusContainer}>
                   {getStatusIcon(workout.status)}
                   <Text style={[
                     styles.workoutStatus,
-                    workout.status === 'missed' && styles.missedWorkoutStatus,
-                    workout.status === 'completed' && styles.completedWorkoutStatus
+                    (workout.status === 'missed' || workout.status === 'no_show') && styles.missedWorkoutStatus,
+                    workout.status === 'completed' && styles.completedWorkoutStatus,
+                    workout.status === 'cancelled' && styles.cancelledWorkoutStatus
                   ]}>
                     {workout.status === 'completed' && `${workout.duration_minutes || 0} min completed`}
-                    {workout.status === 'scheduled' && (workout.start_time ? `Scheduled ${workout.start_time}` : 'Ready to start')}
-                    {workout.status === 'missed' && 'Missed session'}
+                    {workout.status === 'scheduled' && (workout.scheduledTime ? `Scheduled ${workout.scheduledTime}` : 'Ready to start')}
+                    {(workout.status === 'missed' || workout.status === 'no_show') && 'Missed session'}
+                    {workout.status === 'cancelled' && 'Cancelled'}
                   </Text>
                 </View>
               )}
@@ -497,7 +457,9 @@ export default function TrainingCalendarScreen() {
                 style={styles.playButton}
                 onPress={(e) => {
                   e.stopPropagation();
-                  router.push(`/start-workout/${workout.id}`);
+                  if (workout.sessionId) {
+                    router.push(`/start-workout/${workout.sessionId}`);
+                  }
                 }}
               >
                 <Play size={16} color="#FFFFFF" />
@@ -532,7 +494,7 @@ export default function TrainingCalendarScreen() {
           <Text style={styles.errorText}>Please log in to view your training calendar</Text>
           <TouchableOpacity 
             style={styles.retryButton} 
-            onPress={() => router.push('/auth/login')}
+            onPress={() => router.replace('/(auth)/login')}
           >
             <Text style={styles.retryButtonText}>Go to Login</Text>
           </TouchableOpacity>
@@ -758,6 +720,10 @@ const createStyles = (colors: any) => StyleSheet.create({
     backgroundColor: colors.error,
     borderColor: colors.error,
   },
+  cancelledDayHeaderCircle: {
+    backgroundColor: colors.textTertiary, // Use a distinct color for cancelled
+    borderColor: colors.textTertiary,
+  },
   dayHeaderNumber: {
     fontFamily: 'Inter-SemiBold',
     fontSize: 16,
@@ -812,6 +778,7 @@ const createStyles = (colors: any) => StyleSheet.create({
     fontFamily: 'Inter-SemiBold',
     fontSize: 18,
     color: colors.text,
+    marginHorizontal: 20,
     marginBottom: 16,
   },
   workoutsList: {
@@ -866,6 +833,10 @@ const createStyles = (colors: any) => StyleSheet.create({
   missedWorkoutItem: {
     borderLeftWidth: 4,
     borderLeftColor: colors.error,
+  },
+  cancelledWorkoutItem: {
+    borderLeftWidth: 4,
+    borderLeftColor: colors.textTertiary, // Distinct border for cancelled
   },
   workoutItemLeft: {
     flexDirection: 'row',
@@ -923,6 +894,9 @@ const createStyles = (colors: any) => StyleSheet.create({
   },
   completedWorkoutStatus: {
     color: colors.success,
+  },
+  cancelledWorkoutStatus: {
+    color: colors.textTertiary,
   },
   workoutNotes: {
     fontFamily: 'Inter-Regular',
